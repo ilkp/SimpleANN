@@ -2,6 +2,7 @@
 
 #include <random>
 #include <math.h>
+#include <mutex>
 
 // Initialize rand() !
 
@@ -15,22 +16,22 @@ namespace simpleANN
 		float (*_derivative)(float);
 	};
 	// Sigmoid function. Outputs value between 0.0f and 1.0f. Slow to calculate so recommended to use for only the output layer.
-	ActFunc sigmoid(
+	static ActFunc sigmoid(
 		[](float x) { return 1.0f / (1.0f + expf(-x)); },
 		[](float x) { return x * (1.0f - x); }
 	);
 	// Rectified linear unit function. Outputs 0 when x < 0, and outputs x when x >= 0.
-	ActFunc relu(
+	static ActFunc relu(
 		[](float x) { return x < 0.0f ? 0.0f : x; },
 		[](float x) { return x < 0.0f ? 0.0f : 1.0f; }
 	);
 	// Leaky rectified linear unit. Outputs 0.01 * x when x < 0, and outputs x when x >= 0.
-	ActFunc leakyRelu(
+	static ActFunc leakyRelu(
 		[](float x) { return x < 0.0f ? 0.01f * x : x; },
 		[](float x) { return x < 0.0f ? 0.01f : 1.0f; }
 	);
 	// Hyperbolic tangent function. Outputs tanhf(x) of math.h
-	ActFunc hyperbolicTanh(
+	static ActFunc hyperbolicTanh(
 		[](float x) { return tanhf(x); },
 		[](float x) { return 1.0f - x * x; }
 	);
@@ -53,15 +54,18 @@ namespace simpleANN
 	class Layer
 	{
 	public:
+		int _id;
 		int _layerSize;
+		std::condition_variable _outputInUseCv;
+		bool _outputInUse = false;
 		Layer* _prevLayer = nullptr;
 		Layer* _nextLayer = nullptr;
 		float* _outputs = nullptr;
 		float* _biases = nullptr;
 		float* _weights = nullptr;
 
-		Layer(Layer* previousLayer, int layerSize, float momentum)
-			: _prevLayer(previousLayer), _layerSize(layerSize), _momentum(momentum)
+		Layer(int id, Layer* previousLayer, int layerSize, float momentum)
+			: _prevLayer(previousLayer), _layerSize(layerSize), _momentum(momentum), _id(id)
 		{
 			_outputs = new float[layerSize];
 			for (int i = 0; i < layerSize; ++i)
@@ -116,20 +120,35 @@ namespace simpleANN
 				delete[](_weightMomentum);
 			}
 		}
-
+		void propagateForward(const float* input)
+		{
+			std::unique_lock<std::mutex> ul(_lock);
+			while (_outputInUse) { _outputInUseCv.wait(ul); }
+			_outputInUse = true;
+			for (int i = 0; i < _layerSize; ++i)
+				_outputs[i] = input[i];
+		}
+		// Note: output layer stays locked until outputWasRead() is called.
 		void propagateForward(float (*actFunc)(float))
 		{
+			std::unique_lock<std::mutex> ul(_lock);
+			while (_outputInUse) { _outputInUseCv.wait(ul); }
+			_outputInUse = true;
 			for (int i = 0; i < _layerSize; ++i)
 			{
 				_outputs[i] = 0.0f;
 				for (int j = 0; j < _prevLayer->_layerSize; ++j)
-				{
 					_outputs[i] += _weights[i * _prevLayer->_layerSize + j] * _prevLayer->_outputs[j];
-				}
 				_outputs[i] += _biases[i];
 				_outputs[i] = actFunc(_outputs[i]);
 			}
+			{
+				std::unique_lock<std::mutex> prevUl(_prevLayer->_lock);
+				_prevLayer->_outputInUse = false;
+			}
+			_prevLayer->_outputInUseCv.notify_one();
 		}
+
 		// Propagate backward. Delta weights and biases are cumulatively added on each back propagation.
 		void propagateBackward(float (*derFunc)(float))
 		{
@@ -179,13 +198,9 @@ namespace simpleANN
 				}
 			}
 		}
-		void setNextLayer(Layer* nextLayer) { _nextLayer = nextLayer; }
-		// Sets the layer's outputs. Used on input layer to set the networks input.
-		void setOutputs(const float* outputs) { for (int i = 0; i < _layerSize; ++i) { _outputs[i] = outputs[i]; }; }
-		// Return the output array.
-		float* getOutput() const { return _outputs; }
 
 	private:
+		std::mutex _lock;
 		float* _deltaWeights = nullptr;
 		float* _deltaBiases = nullptr;
 		float* _weightMomentum = nullptr;
@@ -234,15 +249,16 @@ namespace simpleANN
 			_outputActivationFunction(createInfo._outputActivationFunction)
 		{
 			_learningRate = createInfo._learningRate;
-			_inputLayer = new Layer(nullptr, createInfo._inputSize, createInfo._momentum);
+			_inputLayer = new Layer(0, nullptr, createInfo._inputSize, createInfo._momentum);
 			Layer* layer = _inputLayer;
+			int lId = 1;
 			for (int i = 0; i < createInfo._numberOfHiddenLayers; i++)
 			{
-				Layer* nextLayer = new Layer(layer, createInfo._hiddenSize, createInfo._momentum);
+				Layer* nextLayer = new Layer(lId++, layer, createInfo._hiddenSize, createInfo._momentum);
 				layer->_nextLayer = nextLayer;
 				layer = nextLayer;
 			}
-			_outputLayer = new Layer(layer, createInfo._outputSize, createInfo._momentum);
+			_outputLayer = new Layer(lId, layer, createInfo._outputSize, createInfo._momentum);
 			layer->_nextLayer = _outputLayer;
 		}
 		~ANNetwork()
@@ -261,8 +277,9 @@ namespace simpleANN
 			delete(layer);
 		}
 		// Propagate the network forward. After calling propagateForward(), output array of the last layer will contain the networks output.
-		void propagateForward()
+		void propagateForward(const float* input)
 		{
+			_inputLayer->propagateForward(input);
 			Layer* layer = _inputLayer->_nextLayer;
 			while (layer->_nextLayer != nullptr)
 			{
@@ -292,6 +309,11 @@ namespace simpleANN
 				layer->update(_learningRate, batchSize);
 				layer = layer->_prevLayer;
 			}
+		}
+		void outputWasRead()
+		{
+			_outputLayer->_outputInUse = false;
+			_outputLayer->_outputInUseCv.notify_one();
 		}
 	};
 }
