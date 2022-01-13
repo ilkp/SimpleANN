@@ -6,7 +6,7 @@
 
 // Initialize rand() !
 
-namespace simpleANN
+namespace ilep
 {
 	struct ActFunc
 	{
