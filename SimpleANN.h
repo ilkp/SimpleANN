@@ -1,3 +1,7 @@
+// SimpleANN (Simple Artificial Neural Network)
+// Copyright © 2021 Ilkka Pokkinen
+// Released under MIT license
+
 #pragma once
 
 #include <random>
