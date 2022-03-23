@@ -6,113 +6,84 @@
 
 // Initialize rand() !
 
-namespace ilep
+namespace sann
 {
-	struct ActFunc
-	{
-	public:
-		ActFunc(float (*activation)(float), float (*derivative)(float)) : _activation(activation), _derivative(derivative) {}
-		float (*_activation)(float);
-		float (*_derivative)(float);
-	};
 	// Sigmoid function. Outputs value between 0.0f and 1.0f. Slow to calculate so recommended to use for only the output layer.
-	static ActFunc sigmoid(
-		[](float x) { return 1.0f / (1.0f + expf(-x)); },
-		[](float x) { return x * (1.0f - x); }
-	);
+	inline float sigmoidAct(float x) { return 1.0f / (1.0f + expf(-x)); }
+	inline float sigmoidDer(float x) { return x * (1.0f - x); }
 	// Rectified linear unit function. Outputs 0 when x < 0, and outputs x when x >= 0.
-	static ActFunc relu(
-		[](float x) { return x < 0.0f ? 0.0f : x; },
-		[](float x) { return x < 0.0f ? 0.0f : 1.0f; }
-	);
+	inline float reluAct(float x) { return x < 0.0f ? 0.0f : x; }
+	inline float reluDer(float x) { return x < 0.0f ? 0.0f : 1.0f; }
 	// Leaky rectified linear unit. Outputs 0.01 * x when x < 0, and outputs x when x >= 0.
-	static ActFunc leakyRelu(
-		[](float x) { return x < 0.0f ? 0.01f * x : x; },
-		[](float x) { return x < 0.0f ? 0.01f : 1.0f; }
-	);
+	inline float leakyReluAct(float x) { return x < 0.0f ? 0.01f * x : x; }
+	inline float leakyReluDer(float x) { return x < 0.0f ? 0.01f : 1.0f; }
 	// Hyperbolic tangent function. Outputs tanhf(x) of math.h
-	static ActFunc hyperbolicTanh(
-		[](float x) { return tanhf(x); },
-		[](float x) { return 1.0f - x * x; }
-	);
-
+	inline float hyperbolicTanhAct(float x) { return tanhf(x); }
+	inline float hyperbolicTanhDer(float x) { return 1.0f - x * x; }
 
 	struct CreateInfo
 	{
-		ActFunc _hiddenActivationFunction = hyperbolicTanh;
-		ActFunc _outputActivationFunction = sigmoid;
-		int _inputSize = 1;
-		int _outputSize = 1;
-		int _hiddenSize = 1;
-		int _numberOfHiddenLayers = 1;
-		float _learningRate = 0.1f;
+		float (*hiddenActFunc)(float) = leakyReluAct;
+		float (*hiddenDerFunc)(float) = leakyReluDer;
+		float (*outActFunc)(float) = sigmoidAct;
+		float (*outDerFunc)(float) = sigmoidDer;
+		int inputSize = 1;
+		int outputSize = 1;
+		int hiddenSize = 1;
+		int numberOfHiddenLayers = 1;
+		float learningRate = 0.1f;
 		// Momentum between 0.0f and 1.0f. If 0.0f, then no memory is allocated for momentum array.
 		// Momentum carries part of the previous delta values over when calculating new weights and biases.
-		float _momentum = 0.0f;
+		float momentum = 0.0f;
 	};
 
 	class Layer
 	{
 	public:
-		int _id;
-		int _layerSize;
-		std::condition_variable _outputInUseCv;
-		bool _outputInUse = false;
-		Layer* _prevLayer = nullptr;
-		Layer* _nextLayer = nullptr;
-		float* _outputs = nullptr;
-		float* _biases = nullptr;
-		float* _weights = nullptr;
+		int layerSize;
+		std::condition_variable outputInUseCv;
+		bool outputInUse = false;
+		Layer* prevLayer = nullptr;
+		Layer* nextLayer = nullptr;
+		float* outputs = nullptr;
+		float* biases = nullptr;
+		float* weights = nullptr;
 
-		Layer(int id, Layer* previousLayer, int layerSize, float momentum)
-			: _prevLayer(previousLayer), _layerSize(layerSize), _momentum(momentum), _id(id)
+		Layer(Layer* previousLayer, int layerSize, float momentum) : prevLayer(previousLayer), layerSize(layerSize), _momentum(momentum)
 		{
-			_outputs = new float[layerSize];
+			outputs = new float[layerSize];
+			for (int i = 0; i < layerSize; ++i)
+				outputs[i] = 0.0f;
+			
+			if (previousLayer == nullptr)
+				return;
+
+			weights = new float[layerSize * previousLayer->layerSize];
+			biases = new float[layerSize];
+			_deltaWeights = new float[layerSize * previousLayer->layerSize] { 0.0f };
+			_deltaBiases = new float[layerSize] { 0.0f };
+			_error = new float[layerSize] { 0.0f };
 			for (int i = 0; i < layerSize; ++i)
 			{
-				_outputs[i] = 0.0f;
+				biases[i] = 2.0f * (float(rand()) / float(RAND_MAX)) - 1.0f;
+				for (int j = 0; j < previousLayer->layerSize; ++j)
+				{
+					weights[i * prevLayer->layerSize + j] = 2.0f * (float(rand()) / float(RAND_MAX)) - 1.0f;
+				}
 			}
-
-			if (previousLayer != nullptr)
+			if (momentum != 0.0f)
 			{
-				_weights = new float[layerSize * previousLayer->_layerSize];
-				_deltaWeights = new float[layerSize * previousLayer->_layerSize];
-				_biases = new float[layerSize];
-				_deltaBiases = new float[layerSize];
-				_error = new float[layerSize];
-				if (momentum > 0.0f)
-				{
-					_weightMomentum = new float[layerSize * previousLayer->_layerSize];
-					_biasMomentum = new float[layerSize];
-				}
-				for (int i = 0; i < layerSize; ++i)
-				{
-					_biases[i] = 2.0f * (float(rand()) / float(RAND_MAX)) - 1.0f;
-					_deltaBiases[i] = 0.0f;
-					if (momentum > 0.0f)
-					{
-						_biasMomentum[i] = 0.0f;
-					}
-					_error[i] = 0.0f;
-					for (int j = 0; j < previousLayer->_layerSize; ++j)
-					{
-						_weights[i * _prevLayer->_layerSize + j] = 2.0f * (float(rand()) / float(RAND_MAX)) - 1.0f;
-						_deltaWeights[i * _prevLayer->_layerSize + j] = 0.0f;
-						if (momentum > 0.0f)
-						{
-							_weightMomentum[i * _prevLayer->_layerSize + j] = 0.0f;
-						}
-					}
-				}
+				_weightMomentum = new float[layerSize * previousLayer->layerSize] { 0.0f };
+				_biasMomentum = new float[layerSize] { 0.0f };
 			}
 		}
 		~Layer()
 		{
-			delete[](_outputs);
+			delete[](outputs);
 			delete[](_error);
-			delete[](_weights);
+			delete[](weights);
 			delete[](_deltaWeights);
-			delete[](_biases);
+			delete[](biases);
 			delete[](_deltaBiases);
 			if (_momentum > 0)
 			{
@@ -120,33 +91,38 @@ namespace ilep
 				delete[](_weightMomentum);
 			}
 		}
+		Layer(const Layer& other) = delete;
+		Layer(Layer&& other) = delete;
+		Layer& operator=(const Layer& other) = delete;
+		Layer& operator=(Layer&& other) = delete;
+		
 		void propagateForward(const float* input)
 		{
 			std::unique_lock<std::mutex> ul(_lock);
-			while (_outputInUse) { _outputInUseCv.wait(ul); }
-			_outputInUse = true;
-			for (int i = 0; i < _layerSize; ++i)
-				_outputs[i] = input[i];
+			while (outputInUse) { outputInUseCv.wait(ul); }
+			outputInUse = true;
+			for (int i = 0; i < layerSize; ++i)
+				outputs[i] = input[i];
 		}
 		// Note: output layer stays locked until outputWasRead() is called.
 		void propagateForward(float (*actFunc)(float))
 		{
 			std::unique_lock<std::mutex> ul(_lock);
-			while (_outputInUse) { _outputInUseCv.wait(ul); }
-			_outputInUse = true;
-			for (int i = 0; i < _layerSize; ++i)
+			while (outputInUse) { outputInUseCv.wait(ul); }
+			outputInUse = true;
+			for (int i = 0; i < layerSize; ++i)
 			{
-				_outputs[i] = 0.0f;
-				for (int j = 0; j < _prevLayer->_layerSize; ++j)
-					_outputs[i] += _weights[i * _prevLayer->_layerSize + j] * _prevLayer->_outputs[j];
-				_outputs[i] += _biases[i];
-				_outputs[i] = actFunc(_outputs[i]);
+				outputs[i] = 0.0f;
+				for (int j = 0; j < prevLayer->layerSize; ++j)
+					outputs[i] += weights[i * prevLayer->layerSize + j] * prevLayer->outputs[j];
+				outputs[i] += biases[i];
+				outputs[i] = actFunc(outputs[i]);
 			}
 			{
-				std::unique_lock<std::mutex> prevUl(_prevLayer->_lock);
-				_prevLayer->_outputInUse = false;
+				std::unique_lock<std::mutex> prevUl(prevLayer->_lock);
+				prevLayer->outputInUse = false;
 			}
-			_prevLayer->_outputInUseCv.notify_one();
+			prevLayer->outputInUseCv.notify_one();
 		}
 
 		// Propagate backward. Delta weights and biases are cumulatively added on each back propagation.
@@ -159,10 +135,8 @@ namespace ilep
 		// Propagate backward with error of (target - output).
 		void propagateBackward(const float* label, float (*derFunc)(float))
 		{
-			for (int i = 0; i < _layerSize; ++i)
-			{
-				_error[i] = label[i] - _outputs[i];
-			}
+			for (int i = 0; i < layerSize; ++i)
+				_error[i] = label[i] - outputs[i];
 			calculateDerivative(derFunc);
 			calculateDelta();
 		}
@@ -170,29 +144,29 @@ namespace ilep
 		void update(float learningRate, int epochs)
 		{
 			unsigned int node;
-			for (int i = 0; i < _layerSize; ++i)
+			for (int i = 0; i < layerSize; ++i)
 			{
 				if (_momentum > 0.0f)
 				{
-					_biases[i] += learningRate * _deltaBiases[i] / epochs + _biasMomentum[i];
+					biases[i] += learningRate * _deltaBiases[i] / epochs + _biasMomentum[i];
 					_biasMomentum[i] = _momentum * _biasMomentum[i] + _momentum * _deltaBiases[i];
 				}
 				else
 				{
-					_biases[i] += learningRate * _deltaBiases[i] / epochs;
+					biases[i] += learningRate * _deltaBiases[i] / epochs;
 				}
 				_deltaBiases[i] = 0.0f;
-				for (int j = 0; j < _prevLayer->_layerSize; ++j)
+				for (int j = 0; j < prevLayer->layerSize; ++j)
 				{
-					node = i * _prevLayer->_layerSize + j;
+					node = i * prevLayer->layerSize + j;
 					if (_momentum > 0.0f)
 					{
-						_weights[node] += learningRate * _deltaWeights[node] / epochs + _weightMomentum[node];
+						weights[node] += learningRate * _deltaWeights[node] / epochs + _weightMomentum[node];
 						_weightMomentum[node] = _momentum * _weightMomentum[node] + _momentum * _deltaWeights[node];
 					}
 					else
 					{
-						_weights[node] += learningRate * _deltaWeights[node] / epochs;
+						weights[node] += learningRate * _deltaWeights[node] / epochs;
 					}
 					_deltaWeights[node] = 0.0f;
 				}
@@ -210,25 +184,25 @@ namespace ilep
 
 		void calculateError()
 		{
-			for (int i = 0; i < _layerSize; ++i)
+			for (int i = 0; i < layerSize; ++i)
 			{
 				_error[i] = 0.0f;
-				for (int j = 0; j < _nextLayer->_layerSize; ++j)
-					_error[i] += _nextLayer->_error[j] * _nextLayer->_weights[j * _layerSize + i];
+				for (int j = 0; j < nextLayer->layerSize; ++j)
+					_error[i] += nextLayer->_error[j] * nextLayer->weights[j * layerSize + i];
 			}
 		}
 		void calculateDerivative(float (*derFunc)(float))
 		{
-			for (int i = 0; i < _layerSize; ++i)
-				_error[i] = _error[i] * derFunc(_outputs[i]);
+			for (int i = 0; i < layerSize; ++i)
+				_error[i] = _error[i] * derFunc(outputs[i]);
 		}
 		void calculateDelta()
 		{
-			for (int i = 0; i < _layerSize; ++i)
+			for (int i = 0; i < layerSize; ++i)
 			{
 				_deltaBiases[i] += _error[i];
-				for (int j = 0; j < _prevLayer->_layerSize; ++j)
-					_deltaWeights[i * _prevLayer->_layerSize + j] += _error[i] * _prevLayer->_outputs[j];
+				for (int j = 0; j < prevLayer->layerSize; ++j)
+					_deltaWeights[i * prevLayer->layerSize + j] += _error[i] * prevLayer->outputs[j];
 			}
 		}
 	};
@@ -236,84 +210,92 @@ namespace ilep
 	class ANNetwork
 	{
 	public:
-		Layer* _inputLayer = nullptr;
-		Layer* _outputLayer = nullptr;
-		ActFunc _hiddenActivationFunction = leakyRelu;
-		ActFunc _outputActivationFunction = sigmoid;
-		float _learningRate = 0.1f;
-		// Momentum between 0.0f and 1.0f. If 0.0f, then no memory is allocated for momentum array.
-		// Momentum carries part of the previous delta values over when calculating new weights and biases.
+		Layer* inputLayer = nullptr;
+		Layer* outputLayer = nullptr;
 
-		ANNetwork(const CreateInfo& createInfo) :
-			_hiddenActivationFunction(createInfo._hiddenActivationFunction),
-			_outputActivationFunction(createInfo._outputActivationFunction)
+		ANNetwork(const CreateInfo& createInfo)
 		{
-			_learningRate = createInfo._learningRate;
-			_inputLayer = new Layer(0, nullptr, createInfo._inputSize, createInfo._momentum);
-			Layer* layer = _inputLayer;
+			_hiddenActFunc = createInfo.hiddenActFunc;
+			_hiddenDerFunc = createInfo.hiddenDerFunc;
+			_outActFunc = createInfo.outActFunc;
+			_outDerFunc = createInfo.outDerFunc;
+			_learningRate = createInfo.learningRate;
+			inputLayer = new Layer(0, nullptr, createInfo.inputSize, createInfo.momentum);
+			Layer* layer = inputLayer;
 			int lId = 1;
-			for (int i = 0; i < createInfo._numberOfHiddenLayers; i++)
+			for (int i = 0; i < createInfo.numberOfHiddenLayers; i++)
 			{
-				Layer* nextLayer = new Layer(lId++, layer, createInfo._hiddenSize, createInfo._momentum);
-				layer->_nextLayer = nextLayer;
+				Layer* nextLayer = new Layer(lId++, layer, createInfo.hiddenSize, createInfo.momentum);
+				layer->nextLayer = nextLayer;
 				layer = nextLayer;
 			}
-			_outputLayer = new Layer(lId, layer, createInfo._outputSize, createInfo._momentum);
-			layer->_nextLayer = _outputLayer;
+			outputLayer = new Layer(lId, layer, createInfo.outputSize, createInfo.momentum);
+			layer->nextLayer = outputLayer;
 		}
 		~ANNetwork()
 		{
-			if (!_outputLayer)
-			{
+			if (!outputLayer)
 				return;
-			}
-
-			Layer* layer = _outputLayer->_prevLayer;
-			while (layer->_prevLayer != nullptr)
+			Layer* layer = outputLayer->prevLayer;
+			while (layer->prevLayer != nullptr)
 			{
-				delete(layer->_nextLayer);
-				layer = layer->_prevLayer;
+				delete(layer->nextLayer);
+				layer = layer->prevLayer;
 			}
 			delete(layer);
 		}
+		ANNetwork(const ANNetwork& other) = delete;
+		ANNetwork(ANNetwork&& other) = delete;
+		ANNetwork& operator=(const ANNetwork& other) = delete;
+		ANNetwork& operator=(ANNetwork&& other) = delete;
+		
 		// Propagate the network forward. After calling propagateForward(), output array of the last layer will contain the networks output.
 		void propagateForward(const float* input)
 		{
-			_inputLayer->propagateForward(input);
-			Layer* layer = _inputLayer->_nextLayer;
-			while (layer->_nextLayer != nullptr)
+			inputLayer->propagateForward(input);
+			Layer* layer = inputLayer->nextLayer;
+			while (layer->nextLayer != nullptr)
 			{
-				layer->propagateForward(_hiddenActivationFunction._activation);
-				layer = layer->_nextLayer;
+				layer->propagateForward(_hiddenActFunc);
+				layer = layer->nextLayer;
 			}
-			layer->propagateForward(_outputActivationFunction._activation);
+			layer->propagateForward(_outActFunc);
 		}
 		// Propagate backward. Error of the output layer will be (target - output).
 		void propagateBackward(const float* labels)
 		{
-			Layer* layer = _outputLayer;
-			layer->propagateBackward(labels, _outputActivationFunction._derivative);
-			layer = layer->_prevLayer;
+			Layer* layer = outputLayer;
+			layer->propagateBackward(labels, _outDerFunc);
+			layer = layer->prevLayer;
 
-			while (layer->_prevLayer != nullptr)
+			while (layer->prevLayer != nullptr)
 			{
-				layer->propagateBackward(_hiddenActivationFunction._derivative);
-				layer = layer->_prevLayer;
+				layer->propagateBackward(_hiddenDerFunc);
+				layer = layer->prevLayer;
 			}
 		}
 		void update(int batchSize)
 		{
-			Layer* layer = _outputLayer;
-			while (layer->_prevLayer != nullptr)
+			Layer* layer = outputLayer;
+			while (layer->prevLayer != nullptr)
 			{
 				layer->update(_learningRate, batchSize);
-				layer = layer->_prevLayer;
+				layer = layer->prevLayer;
 			}
 		}
 		void outputWasRead()
 		{
-			_outputLayer->_outputInUse = false;
-			_outputLayer->_outputInUseCv.notify_one();
+			outputLayer->outputInUse = false;
+			outputLayer->outputInUseCv.notify_one();
 		}
+		
+	private:
+		float (*_hiddenActFunc)(float);
+		float (*_hiddenDerFunc)(float);
+		float (*_outActFunc)(float);
+		float (*_outDerFunc)(float);
+		float _learningRate = 0.1f;
+		// Momentum between 0.0f and 1.0f. If 0.0f, then no memory is allocated for momentum array.
+		// Momentum carries part of the previous delta values over when calculating new weights and biases.
 	};
 }
