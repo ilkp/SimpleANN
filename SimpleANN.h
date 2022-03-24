@@ -1,14 +1,11 @@
 // SimpleANN (Simple Artificial Neural Network)
-// Copyright © 2021 Ilkka Pokkinen
+// Copyright © 2021, 2022 Ilkka Pokkinen
 // Released under MIT license
 
 #pragma once
 
-#include <random>
 #include <math.h>
-#include <mutex>
-
-// Initialize rand() !
+#include <algorithm>
 
 namespace sann
 {
@@ -24,282 +21,113 @@ namespace sann
 	// Hyperbolic tangent function. Outputs tanhf(x) of math.h
 	inline float hyperbolicTanhAct(float x) { return tanhf(x); }
 	inline float hyperbolicTanhDer(float x) { return 1.0f - x * x; }
-
-	struct CreateInfo
+	
+	struct SANN
 	{
-		float (*hiddenActFunc)(float) = leakyReluAct;
-		float (*hiddenDerFunc)(float) = leakyReluDer;
-		float (*outActFunc)(float) = sigmoidAct;
-		float (*outDerFunc)(float) = sigmoidDer;
-		int inputSize = 1;
-		int outputSize = 1;
-		int hiddenSize = 1;
-		int numberOfHiddenLayers = 1;
-		float learningRate = 0.1f;
-		// Momentum between 0.0f and 1.0f. If 0.0f, then no memory is allocated for momentum array.
-		// Momentum carries part of the previous delta values over when calculating new weights and biases.
-		float momentum = 0.0f;
+		float (**activationFuncs)(float);
+		float (**derivationFuncs)(float);
+		float leaningRate;
+		float momentumMultiplier;
+		float maxMomentum;
+		unsigned nLayers;
+		unsigned* layerSizes;
+		float** nodeValues;
+		float** weights;
+		float** deltaWeights;
+		float** weightsMomentums;
+		float** biases;
+		float** deltaBiases;
+		float** biasMomentums;
+		float** errors;
 	};
-
-	class Layer
+	
+	inline void propagateForward(SANN& sann, const float* input)
 	{
-	public:
-		int layerSize;
-		std::condition_variable outputInUseCv;
-		bool outputInUse = false;
-		Layer* prevLayer = nullptr;
-		Layer* nextLayer = nullptr;
-		float* outputs = nullptr;
-		float* biases = nullptr;
-		float* weights = nullptr;
-
-		Layer(Layer* previousLayer, int layerSize, float momentum) : prevLayer(previousLayer), layerSize(layerSize), _momentum(momentum)
+		std::copy(input, input + sann.layerSizes[0], sann.nodeValues);
+		for (unsigned layerIndex = 1; layerIndex < sann.nLayers; ++layerIndex)
 		{
-			outputs = new float[layerSize];
-			for (int i = 0; i < layerSize; ++i)
-				outputs[i] = 0.0f;
-			
-			if (previousLayer == nullptr)
-				return;
-
-			weights = new float[layerSize * previousLayer->layerSize];
-			biases = new float[layerSize];
-			_deltaWeights = new float[layerSize * previousLayer->layerSize] { 0.0f };
-			_deltaBiases = new float[layerSize] { 0.0f };
-			_error = new float[layerSize] { 0.0f };
-			for (int i = 0; i < layerSize; ++i)
+			for (unsigned i = 0; i < sann.layerSizes[layerIndex]; ++i)
 			{
-				biases[i] = 2.0f * (float(rand()) / float(RAND_MAX)) - 1.0f;
-				for (int j = 0; j < previousLayer->layerSize; ++j)
-				{
-					weights[i * prevLayer->layerSize + j] = 2.0f * (float(rand()) / float(RAND_MAX)) - 1.0f;
-				}
-			}
-			if (momentum != 0.0f)
-			{
-				_weightMomentum = new float[layerSize * previousLayer->layerSize] { 0.0f };
-				_biasMomentum = new float[layerSize] { 0.0f };
+				float temp = 0.0f;
+				unsigned prevLayerSize = sann.layerSizes[layerIndex - 1];
+				for (unsigned j = 0; j < prevLayerSize; ++j)
+					temp += sann.weights[layerIndex][i * prevLayerSize + j];
+				sann.nodeValues[layerIndex][i] = sann.activationFuncs[layerIndex](temp + sann.biases[layerIndex][i]);
 			}
 		}
-		~Layer()
-		{
-			delete[](outputs);
-			delete[](_error);
-			delete[](weights);
-			delete[](_deltaWeights);
-			delete[](biases);
-			delete[](_deltaBiases);
-			if (_momentum > 0)
-			{
-				delete[](_biasMomentum);
-				delete[](_weightMomentum);
-			}
-		}
-		Layer(const Layer& other) = delete;
-		Layer(Layer&& other) = delete;
-		Layer& operator=(const Layer& other) = delete;
-		Layer& operator=(Layer&& other) = delete;
+	}
+	
+	inline void propagateBackward(SANN& sann, const float* label)
+	{
+		// Calculate errors
+		// output layer
+		for (unsigned i = 0; i < sann.layerSizes[sann.nLayers - 1]; ++i)
+			sann.errors[sann.nLayers - 1][i] = label[i] - sann.nodeValues[sann.nLayers - 1][i];
 		
-		void propagateForward(const float* input)
+		// hidden layers
+		for (unsigned layerIndex = sann.nLayers - 2; layerIndex > 0; --layerIndex)
 		{
-			std::unique_lock<std::mutex> ul(_lock);
-			while (outputInUse) { outputInUseCv.wait(ul); }
-			outputInUse = true;
-			for (int i = 0; i < layerSize; ++i)
-				outputs[i] = input[i];
-		}
-		// Note: output layer stays locked until outputWasRead() is called.
-		void propagateForward(float (*actFunc)(float))
-		{
-			std::unique_lock<std::mutex> ul(_lock);
-			while (outputInUse) { outputInUseCv.wait(ul); }
-			outputInUse = true;
-			for (int i = 0; i < layerSize; ++i)
+			for (unsigned i = 0; i < sann.layerSizes[layerIndex]; ++i)
 			{
-				outputs[i] = 0.0f;
-				for (int j = 0; j < prevLayer->layerSize; ++j)
-					outputs[i] += weights[i * prevLayer->layerSize + j] * prevLayer->outputs[j];
-				outputs[i] += biases[i];
-				outputs[i] = actFunc(outputs[i]);
+				sann.errors[layerIndex][i] = 0.0f;
+				for (unsigned j = 0; j < sann.layerSizes[layerIndex + 1]; ++j)
+					sann.errors[layerIndex][i] += sann.errors[layerIndex + 1][j] * sann.weights[layerIndex + 1][j * sann.layerSizes[layerIndex + 1] + i];
 			}
+		}
+		
+		// Calculate error derivatives
+		for (unsigned layerIndex = sann.nLayers - 1; layerIndex > 0; --layerIndex)
+		{
+			for (unsigned i = 0; i < sann.layerSizes[layerIndex]; ++i)
+				sann.errors[layerIndex][i] *= sann.derivationFuncs[layerIndex](sann.nodeValues[layerIndex][i]);
+		}
+		
+		// Cumulate per weight and bias changes
+		for (unsigned layerIndex = sann.nLayers - 1; layerIndex > 0; --layerIndex)
+		{
+			for (unsigned i = 0; i < sann.layerSizes[layerIndex]; ++i)
 			{
-				std::unique_lock<std::mutex> prevUl(prevLayer->_lock);
-				prevLayer->outputInUse = false;
+				sann.deltaBiases[layerIndex][i] += sann.errors[layerIndex];
+				for (int j = 0; j < sann.layerSizes[layerIndex - 1]; ++j)
+					sann.deltaWeights[i * sann.layerSizes[layerIndex - 1] + j] += sann.errors[layerIndex][i] * sann.nodeValues[layerIndex - 1][j];
 			}
-			prevLayer->outputInUseCv.notify_one();
 		}
-
-		// Propagate backward. Delta weights and biases are cumulatively added on each back propagation.
-		void propagateBackward(float (*derFunc)(float))
+	}
+	
+	inline void update(SANN& sann, unsigned epochs)
+	{
+		unsigned weightIndex;
+		for (int layerIndex = sann.nLayers - 1; layerIndex > 0; --layerIndex)
 		{
-			calculateError();
-			calculateDerivative(derFunc);
-			calculateDelta();
-		}
-		// Propagate backward with error of (target - output).
-		void propagateBackward(const float* label, float (*derFunc)(float))
-		{
-			for (int i = 0; i < layerSize; ++i)
-				_error[i] = label[i] - outputs[i];
-			calculateDerivative(derFunc);
-			calculateDelta();
-		}
-		// Update weights and biases. Update will zero delta values. If the layer has momentum, update will calculate new momentum values.
-		void update(float learningRate, int epochs)
-		{
-			unsigned int node;
-			for (int i = 0; i < layerSize; ++i)
+			for (int i = 0; i < sann.layerSizes[layerIndex]; ++i)
 			{
-				if (_momentum > 0.0f)
+				if (sann.momentumMultiplier != 0.0f)
 				{
-					biases[i] += learningRate * _deltaBiases[i] / epochs + _biasMomentum[i];
-					_biasMomentum[i] = _momentum * _biasMomentum[i] + _momentum * _deltaBiases[i];
+					sann.biases[layerIndex][i] += sann.leaningRate * sann.deltaBiases[layerIndex][i] / epochs + sann.biasMomentums[layerIndex][i];
+					sann.biasMomentums[layerIndex][i] = sann.momentumMultiplier * sann.biasMomentums[layerIndex][i] + sann.momentumMultiplier * sann.deltaBiases[layerIndex][i];
+					sann.biasMomentums[layerIndex][i] = std::clamp(sann.biasMomentums[layerIndex][i], -sann.maxMomentum, sann.maxMomentum);
 				}
 				else
 				{
-					biases[i] += learningRate * _deltaBiases[i] / epochs;
+					sann.biases[layerIndex][i] += sann.leaningRate * sann.deltaBiases[layerIndex][i] / epochs;
 				}
-				_deltaBiases[i] = 0.0f;
-				for (int j = 0; j < prevLayer->layerSize; ++j)
+				sann.deltaBiases[layerIndex][i] = 0.0f;
+				for (unsigned j = 0; sann.layerSizes[layerIndex - 1]; ++j)
 				{
-					node = i * prevLayer->layerSize + j;
-					if (_momentum > 0.0f)
+					weightIndex = i * sann.layerSizes[layerIndex - 1] + j;
+					if (sann.momentumMultiplier != 0.0f)
 					{
-						weights[node] += learningRate * _deltaWeights[node] / epochs + _weightMomentum[node];
-						_weightMomentum[node] = _momentum * _weightMomentum[node] + _momentum * _deltaWeights[node];
+						sann.weights[layerIndex][weightIndex] += sann.leaningRate * sann.deltaWeights[layerIndex][weightIndex] / epochs + sann.weightsMomentums[layerIndex][weightIndex];
+						sann.weightsMomentums[layerIndex][weightIndex] = sann.momentumMultiplier * sann.weightsMomentums[layerIndex][weightIndex] + sann.momentumMultiplier * sann.deltaWeights[layerIndex][weightIndex];
+						sann.weightsMomentums[layerIndex][weightIndex] = std::clamp(sann.weightsMomentums[layerIndex][weightIndex], -sann.maxMomentum, sann.maxMomentum);
 					}
 					else
 					{
-						weights[node] += learningRate * _deltaWeights[node] / epochs;
+						sann.weights[layerIndex][weightIndex] += sann.leaningRate * sann.deltaWeights[layerIndex][weightIndex] / epochs;
 					}
-					_deltaWeights[node] = 0.0f;
+					sann.deltaWeights[layerIndex][weightIndex] = 0.0f;
 				}
 			}
 		}
-
-	private:
-		std::mutex _lock;
-		float* _deltaWeights = nullptr;
-		float* _deltaBiases = nullptr;
-		float* _weightMomentum = nullptr;
-		float* _biasMomentum = nullptr;
-		float* _error = nullptr;
-		float _momentum = 0.0f; // Momentum value. If momentum is 0.0f, no memory is allocated for momentum.
-
-		void calculateError()
-		{
-			for (int i = 0; i < layerSize; ++i)
-			{
-				_error[i] = 0.0f;
-				for (int j = 0; j < nextLayer->layerSize; ++j)
-					_error[i] += nextLayer->_error[j] * nextLayer->weights[j * layerSize + i];
-			}
-		}
-		void calculateDerivative(float (*derFunc)(float))
-		{
-			for (int i = 0; i < layerSize; ++i)
-				_error[i] = _error[i] * derFunc(outputs[i]);
-		}
-		void calculateDelta()
-		{
-			for (int i = 0; i < layerSize; ++i)
-			{
-				_deltaBiases[i] += _error[i];
-				for (int j = 0; j < prevLayer->layerSize; ++j)
-					_deltaWeights[i * prevLayer->layerSize + j] += _error[i] * prevLayer->outputs[j];
-			}
-		}
-	};
-
-	class ANNetwork
-	{
-	public:
-		Layer* inputLayer = nullptr;
-		Layer* outputLayer = nullptr;
-
-		ANNetwork(const CreateInfo& createInfo)
-		{
-			_hiddenActFunc = createInfo.hiddenActFunc;
-			_hiddenDerFunc = createInfo.hiddenDerFunc;
-			_outActFunc = createInfo.outActFunc;
-			_outDerFunc = createInfo.outDerFunc;
-			_learningRate = createInfo.learningRate;
-			inputLayer = new Layer(0, nullptr, createInfo.inputSize, createInfo.momentum);
-			Layer* layer = inputLayer;
-			int lId = 1;
-			for (int i = 0; i < createInfo.numberOfHiddenLayers; i++)
-			{
-				Layer* nextLayer = new Layer(lId++, layer, createInfo.hiddenSize, createInfo.momentum);
-				layer->nextLayer = nextLayer;
-				layer = nextLayer;
-			}
-			outputLayer = new Layer(lId, layer, createInfo.outputSize, createInfo.momentum);
-			layer->nextLayer = outputLayer;
-		}
-		~ANNetwork()
-		{
-			if (!outputLayer)
-				return;
-			Layer* layer = outputLayer->prevLayer;
-			while (layer->prevLayer != nullptr)
-			{
-				delete(layer->nextLayer);
-				layer = layer->prevLayer;
-			}
-			delete(layer);
-		}
-		ANNetwork(const ANNetwork& other) = delete;
-		ANNetwork(ANNetwork&& other) = delete;
-		ANNetwork& operator=(const ANNetwork& other) = delete;
-		ANNetwork& operator=(ANNetwork&& other) = delete;
-		
-		// Propagate the network forward. After calling propagateForward(), output array of the last layer will contain the networks output.
-		void propagateForward(const float* input)
-		{
-			inputLayer->propagateForward(input);
-			Layer* layer = inputLayer->nextLayer;
-			while (layer->nextLayer != nullptr)
-			{
-				layer->propagateForward(_hiddenActFunc);
-				layer = layer->nextLayer;
-			}
-			layer->propagateForward(_outActFunc);
-		}
-		// Propagate backward. Error of the output layer will be (target - output).
-		void propagateBackward(const float* labels)
-		{
-			Layer* layer = outputLayer;
-			layer->propagateBackward(labels, _outDerFunc);
-			layer = layer->prevLayer;
-
-			while (layer->prevLayer != nullptr)
-			{
-				layer->propagateBackward(_hiddenDerFunc);
-				layer = layer->prevLayer;
-			}
-		}
-		void update(int batchSize)
-		{
-			Layer* layer = outputLayer;
-			while (layer->prevLayer != nullptr)
-			{
-				layer->update(_learningRate, batchSize);
-				layer = layer->prevLayer;
-			}
-		}
-		void outputWasRead()
-		{
-			outputLayer->outputInUse = false;
-			outputLayer->outputInUseCv.notify_one();
-		}
-		
-	private:
-		float (*_hiddenActFunc)(float);
-		float (*_hiddenDerFunc)(float);
-		float (*_outActFunc)(float);
-		float (*_outDerFunc)(float);
-		float _learningRate = 0.1f;
-		// Momentum between 0.0f and 1.0f. If 0.0f, then no memory is allocated for momentum array.
-		// Momentum carries part of the previous delta values over when calculating new weights and biases.
-	};
+	}
 }
