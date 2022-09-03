@@ -36,10 +36,9 @@ namespace sann
         float** biasMomentums;
     };
 
-    inline void allocNN(NeuralNetwork& neuralNetwork, unsigned* layerSizes)
+    inline void allocNN(NeuralNetwork& neuralNetwork)
     {
         const unsigned nLayers = neuralNetwork.nLayers;
-        neuralNetwork.layerSizes = new unsigned[nLayers];
         neuralNetwork.values = new float*[nLayers];
         neuralNetwork.errors = new float*[nLayers];
         neuralNetwork.weights = new float*[nLayers];
