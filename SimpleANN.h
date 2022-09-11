@@ -21,11 +21,12 @@ namespace sann
         float momentumMultiplier;
         float learningRate;
         float maxMomentum;
-        float mse;
+        float epochError;
         unsigned* layerSizes;
         float** zValues;
         float** aValues;
         float** errors;
+        float** cumulativeErrors;
         float** weights;
         float** dWeights;
         float** weightMomentums;
@@ -41,6 +42,7 @@ namespace sann
         neuralNetwork.zValues = new float* [nLayers];
         neuralNetwork.aValues = new float* [nLayers];
         neuralNetwork.errors = new float* [nLayers];
+        neuralNetwork.cumulativeErrors = new float* [nLayers];
         neuralNetwork.weights = new float* [nLayers];
         neuralNetwork.dWeights = new float* [nLayers];
         neuralNetwork.biases = new float* [nLayers];
@@ -48,6 +50,7 @@ namespace sann
         if (nLayers > 0)
         {
             neuralNetwork.errors[0] = nullptr;
+            neuralNetwork.cumulativeErrors[0] = nullptr;
             neuralNetwork.biases[0] = nullptr;
             neuralNetwork.dBiases[0] = nullptr;
             neuralNetwork.weights[0] = nullptr;
@@ -72,6 +75,7 @@ namespace sann
         for (unsigned i = 1; i < nLayers; ++i)
         {
             neuralNetwork.errors[i] = new float[neuralNetwork.layerSizes[i]];
+            neuralNetwork.cumulativeErrors[i] = new float[neuralNetwork.layerSizes[i]];
             neuralNetwork.weights[i] = new float[neuralNetwork.layerSizes[i] * neuralNetwork.layerSizes[i - 1]];
             neuralNetwork.dWeights[i] = new float[neuralNetwork.layerSizes[i] * neuralNetwork.layerSizes[i - 1]] { 0.0f };
             neuralNetwork.biases[i] = new float[neuralNetwork.layerSizes[i]];
@@ -112,6 +116,7 @@ namespace sann
                 float sum = 0.0f;
                 for (unsigned prevNode = 0; prevNode < nn.layerSizes[layer - 1]; ++prevNode)
                     sum += nn.aValues[layer - 1][prevNode] * nn.weights[layer][node * nn.layerSizes[layer - 1] + prevNode];
+                sum += nn.biases[layer][node];
                 nn.zValues[layer][node] = sum;
                 nn.aValues[layer][node] = stepFuncs[layer].activation(sum);
             }
@@ -120,58 +125,44 @@ namespace sann
 
     inline void propagateBackwards(NeuralNetwork& nn, const StepFunction stepFuncs[], const float* label)
     {
-        // mean square error & error at output layer
-        nn.mse = 0.0f;
-        float dmse = 0.0f;
+        // network error & error at output layer
+        nn.epochError = 0.0f;
         for (unsigned i = 0; i < nn.layerSizes[nn.nLayers - 1]; ++i)
         {
-            float dist = label[i] - nn.aValues[nn.nLayers - 1][i];
-            nn.mse += dist * dist;
-            dmse += 2 * dist;
-        }
+            float distance = label[i] - nn.aValues[nn.nLayers - 1][i];
+            float stepFuncDerivative = stepFuncs[nn.nLayers - 1].derivative(nn.aValues[nn.nLayers - 1][i]);
+            nn.epochError += 0.5f * distance * distance;
+            nn.errors[nn.nLayers - 1][i] = stepFuncDerivative * -distance;
 
-        // output layer
-        for (unsigned node = 0; node < nn.layerSizes[nn.nLayers - 1]; ++node)
-            nn.errors[nn.nLayers - 1][node] = stepFuncs[nn.nLayers - 1].derivative(nn.zValues[nn.nLayers - 1][node]) * dmse;
+            for (unsigned prevNode = 0; prevNode < nn.layerSizes[nn.layerSizes[nn.nLayers - 2]]; ++prevNode)
+                nn.dWeights[nn.nLayers - 1][i * nn.layerSizes[nn.nLayers - 2] + prevNode]
+                += nn.aValues[nn.nLayers - 2][prevNode] * nn.errors[nn.nLayers - 1][i];
+        }
 
         // hidden layers
         for (unsigned layerIndex = nn.nLayers - 2; layerIndex > 0; --layerIndex)
         {
             for (unsigned node = 0; node < nn.layerSizes[layerIndex]; ++node)
             {
-                float errorSum = 0.0f;
+                float stepFuncDerivative = stepFuncs[layerIndex].derivative(nn.aValues[layerIndex][node]);
+                float totalErrorIn = 0.0f;
                 for (unsigned nodeNext = 0; nodeNext < nn.layerSizes[layerIndex + 1]; ++nodeNext)
-                    errorSum += nn.weights[layerIndex + 1][nodeNext * nn.layerSizes[layerIndex] + node] * nn.errors[layerIndex + 1][nodeNext];
-                nn.errors[layerIndex][node] = stepFuncs[layerIndex].derivative(nn.zValues[layerIndex][node]) * errorSum;
+                    totalErrorIn += nn.weights[layerIndex + 1][nodeNext * nn.layerSizes[layerIndex] + node] * nn.errors[layerIndex + 1][nodeNext];
+                nn.errors[layerIndex][node] = stepFuncDerivative * totalErrorIn;
+
+                for (unsigned prevNode = 0; prevNode < nn.layerSizes[layerIndex - 1]; ++prevNode)
+                    nn.dWeights[layerIndex][node * nn.layerSizes[layerIndex - 1] + prevNode]
+                    += nn.aValues[layerIndex - 1][prevNode] * nn.errors[layerIndex][node];
             }
         }
-
-        // cumulate weight and bias changes
-        for (unsigned layerIndex = nn.nLayers - 1; layerIndex > 0; --layerIndex)
-        {
-            for (unsigned node = 0; node < nn.layerSizes[layerIndex]; ++node)
-            {
-                nn.dBiases[layerIndex][node] += nn.errors[layerIndex][node];
-                for (int nodePrev = 0; nodePrev < nn.layerSizes[layerIndex - 1]; ++nodePrev)
-                    nn.dWeights[layerIndex][node * nn.layerSizes[layerIndex - 1] + nodePrev] += nn.aValues[layerIndex - 1][nodePrev] * nn.errors[layerIndex][node];
-            }
-        }
-    }
-
-    inline void update(NeuralNetwork& nn, unsigned epochs)
-    {
-        if (nn.weightMomentums == nullptr)
-            updateNoMomentum(nn, epochs);
-        else
-            updateWithMomentum(nn, epochs);
     }
 
     inline void updateNoMomentum(NeuralNetwork& nn, unsigned epochs)
     {
         unsigned weightIndex;
-        for (int layerIndex = nn.nLayers - 1; layerIndex > 0; --layerIndex)
+        for (unsigned layerIndex = nn.nLayers - 1; layerIndex > 0; --layerIndex)
         {
-            for (int i = 0; i < nn.layerSizes[layerIndex]; ++i)
+            for (unsigned i = 0; i < nn.layerSizes[layerIndex]; ++i)
             {
                 nn.biases[layerIndex][i] -= nn.learningRate * nn.dBiases[layerIndex][i] / epochs;
                 nn.dBiases[layerIndex][i] = 0.0f;
@@ -188,9 +179,9 @@ namespace sann
     inline void updateWithMomentum(NeuralNetwork& nn, unsigned epochs)
     {
         unsigned weightIndex;
-        for (int layerIndex = nn.nLayers - 1; layerIndex > 0; --layerIndex)
+        for (unsigned layerIndex = nn.nLayers - 1; layerIndex > 0; --layerIndex)
         {
-            for (int i = 0; i < nn.layerSizes[layerIndex]; ++i)
+            for (unsigned i = 0; i < nn.layerSizes[layerIndex]; ++i)
             {
                 nn.biases[layerIndex][i] -= nn.learningRate * nn.dBiases[layerIndex][i] / epochs + nn.biasMomentums[layerIndex][i];
                 nn.biasMomentums[layerIndex][i] = nn.momentumMultiplier * nn.biasMomentums[layerIndex][i] + nn.momentumMultiplier * nn.dBiases[layerIndex][i];
@@ -208,6 +199,15 @@ namespace sann
         }
     }
 
+    inline void update(NeuralNetwork& nn, unsigned epochs)
+    {
+        if (nn.weightMomentums == nullptr)
+            updateNoMomentum(nn, epochs);
+        else
+            updateWithMomentum(nn, epochs);
+    }
+
+    // Step functions
     inline float linear(float x)
     {
         return x;
